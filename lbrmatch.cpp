@@ -101,7 +101,7 @@ VOID doRET(ADDRINT returnAddr) {
 		ADDRINT candidate = returnAddr - i;
 		
 		if (candidate == lastEntry.first) {
-			calllLBRMatches++;
+			callLBRMatches++;
 			break;
 		}
 	}
