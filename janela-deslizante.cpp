@@ -39,151 +39,6 @@ struct JanelaThread{
    UINT8 lixo[COMPLEMENTO_LINHA_CACHE]; // área inútil usada para ocupar uma linha inteira da cache
 };
 
-
-/**** Habilite essas funções apenas durante depurações de código, para evitar overhead
-
-// Função executada sempre que um processo filho é criado (forking).
-// Imprime os PIDs do processo pai e do processo filho.
-BOOL TrataCriacaoProcessoFilho(CHILD_PROCESS processoFilho, void *v){
-   // Ativa uma trava interna do Pin para evitar que threads concorrentes escrevam simultaneamente no LOG
-   PIN_LockClient();
-   LOG("#### Criação de processo filho. PID do processo pai: " + decstr( (LEVEL_BASE::INT32) getpid()) + "/ PID do processo filho: " + decstr( (LEVEL_BASE::INT32) CHILD_PROCESS_GetId(processoFilho)) + "\n");
-   // Libera trava
-   PIN_UnlockClient();
-   // injeta dentro do processo filho
-   return TRUE;
-}
-
-// Função executada sempre que um novo módulo é carregado.
-// Imprime a localização do módulo (caminho de pastas) e
-// a faixa de endereços de memória usada por ele.
-void TrataCargaModulo(IMG imagem, void *v){
-   ADDRINT inicio = IMG_LowAddress(imagem);
-   ADDRINT fim = IMG_HighAddress(imagem);
-
-   // Ativa uma trava interna do Pin para evitar que threads concorrentes escrevam simultaneamente no LOG
-   PIN_LockClient();
-   
-   LOG("#### Módulo carregado: (" + 
-       hexstr(inicio, sizeof(inicio) * 2) + " -> " + 
-       hexstr(fim, sizeof(fim) * 2) + ") " + 
-       IMG_Name(imagem) + "\n");
-
-   // Libera trava
-   PIN_UnlockClient(); 
-	  
-   return;
-}
-
-// Função executada sempre que um novo módulo é descarregado.
-// Imprime a localização do módulo (caminho de pastas)
-void TrataDescargaModulo(IMG imagem, void *v){
-   // Ativa uma trava interna do Pin para evitar que threads concorrentes escrevam simultaneamente no LOG
-   PIN_LockClient();
-   LOG("#### Módulo descarregado: " + IMG_Name(imagem) + "\n");
-   // Libera trava
-   PIN_UnlockClient();
-   return;
-}
-
-// Função que captura as mudanças de contexto. Se a mudança de contexto for ocasionada por uma exceção,
-// imprime o conteúdo dos registradores e da pilha.
-void TrataExcecao(THREADID tid, CONTEXT_CHANGE_REASON razao, const CONTEXT *origem, CONTEXT *contexto, INT32 info, void *v){
-   // verifica se a mudança de contexto ocorreu em decorrência de uma exceção
-   if (razao != CONTEXT_CHANGE_REASON_EXCEPTION){
-      return;
-   }
-
-   // salva conteúdo dos registradores EIP, ESP e EBP
-   uint32_t eip = PIN_GetContextReg(origem, REG_EIP);
-   uint32_t esp = PIN_GetContextReg(origem, REG_ESP);
-   uint32_t ebp = PIN_GetContextReg(origem, REG_EBP);
-   uint32_t ebp_filho = 0; // inicializa EBP filho com 0
-
-   // declara e inicializa com 0 um buffer de 1KB para armazenar string
-   char buf[1024];
-   memset(buf, 0, sizeof(buf));
-
-   // monta string que informa valores dos registradores, código da exceção,
-   // endereço da instrução que causou a exceção e ID da thread
-   snprintf(buf, sizeof(buf) - 1,
-             "\n#### Código da exceção=0x%x endereço da instrução=0x%x ID da thread=%d\n\n"
-             "eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x\n"
-             "eip=%08x esp=%08x ebp=%08x\n",
-             info, eip, tid,
-             PIN_GetContextReg(origem, REG_EAX),
-             PIN_GetContextReg(origem, REG_EBX),
-             PIN_GetContextReg(origem, REG_ECX),
-             PIN_GetContextReg(origem, REG_EDX),
-             PIN_GetContextReg(origem, REG_ESI),
-             PIN_GetContextReg(origem, REG_EDI),
-             eip, esp, ebp);
-
-   // Ativa uma trava interna do Pin para evitar que threads concorrentes escrevam simultaneamente no LOG
-   PIN_LockClient();
-   
-   // grava dados da exceção no arquivo de log
-   LOG(buf);
-
-   // limpa o buffer imprime cabeçalho dos dados da pilha		
-   memset(buf, 0, sizeof(buf));
-   snprintf(buf, sizeof(buf) - 1, "\nPilha:\n Frame     EBP-filho Endereço de retorno\n");
-   LOG(buf);
-   
-   // Libera trava
-   PIN_UnlockClient();
-
-   int count = 0; // contador usado para limitar o nº de linhas impressas
-   memset(buf, 0, sizeof(buf)); // limpa o buffer de impressão
-
-   // imprime dados da pilha (no máximo 20 entradas)
-   while(ebp != 0 && count < 20){
-      // salva em ebp_filho o conteúdo de ebp
-      if(PIN_SafeCopy(&ebp_filho, (uint32_t *)(ebp), 4) != 4){
-         break;// interrompe se não forem copiados os 4 bytes (erro)
-      }
-      // salva em eip o endereço de retorno anotado na pilha (ebp+4)
-      if(PIN_SafeCopy(&eip, (uint32_t *)(ebp + 4), 4) != 4){ 
-         break;// interrompe se não forem copiados os 4 bytes (erro)	
-      }
-      // imprime os dados do frame
-      snprintf(buf, sizeof(buf) -1, "%08x %08x %08x\n", ebp, ebp_filho, eip);
-      
-	  // Ativa uma trava interna do Pin para evitar que threads concorrentes escrevam simultaneamente no LOG
-      PIN_LockClient();
-	  
-	  LOG(buf);
-
-	  // Libera trava
-      PIN_UnlockClient();
-	  
-      // atualiza o valor de ebp, fazendo-o apontar para o frame filho
-      if(PIN_SafeCopy(&ebp, (uint32_t *)ebp, 4) != 4){
-         break;// interrompe se não forem copiados os 4 bytes (erro)
-      }
-
-      count++;// incrementa o número de frames impressos
-   }
-   // Ativa uma trava interna do Pin para evitar que threads concorrentes escrevam simultaneamente no LOG
-   PIN_LockClient();
-   
-   LOG("\n");
-   
-   // Libera trava
-   PIN_UnlockClient();
-}
-
-// Função chamada ao finalizar uma thread
-// Imprime o ID e o código de finalização da thread
-void FinalizaThread(THREADID tid, const CONTEXT * contexto, int codigo, void * v){
-   // Ativa uma trava interna do Pin para evitar que threads concorrentes escrevam simultaneamente no LOG
-   PIN_LockClient();
-   LOG("#### ID da thread finalizada: " + decstr((LEVEL_BASE::INT32) tid) + ". Código de finalização: " + hexstr(codigo, sizeof(codigo) * 2) + "\n");
-   // Libera trava
-   PIN_UnlockClient();
-}
-Fim das funções de depuração ****/
-
 // Imprime mensagem indicando opções de uso no prompt de comandos
 void Uso(){	
    fprintf(stderr, "\nUso: pin -t <Pintool> [-l <Limiar>] [-o <NomeArquivoSaida>] [-logfile <NomeLogDepuracao>] -- <Programa alvo>\n\n"
@@ -221,14 +76,6 @@ void IniciaThread(THREADID thread_id, CONTEXT *contexto_registradores, int flags
 
    // Armazena a janela na área de armazenamento (TLS) da thread
    PIN_SetThreadData(chave_tls, janela_ptr, thread_id);
-
-   /**** Habilite esse trecho de código apenas durante depurações, para evitar overhead
-   // Ativa uma trava interna do Pin para evitar que threads concorrentes escrevam simultaneamente no LOG
-   PIN_LockClient();
-   LOG("#### ID da nova thread criada: " + decstr((LEVEL_BASE::INT32) tid) + "\n");
-   // Libera trava
-   PIN_UnlockClient();
-   ****/
 }
 
 // Função chamada quando a aplicação termina de executar.
@@ -344,25 +191,7 @@ int main(int argc, char *argv[]){
       Uso();
       return(1);
    }
-
-   /**** Habilite essas funções apenas durante depurações de código, para evitar overhead
-   // registra a função "TrataCriacaoProcessoFilho" para ser chamada
-   // antes que um eventual processo filho comece a executar
-   PIN_AddFollowChildProcessFunction(TrataCriacaoProcessoFilho, 0);
-
-   // registra a função "TrataCargaModulo" para ser executada quando um módulo for carregado
-   IMG_AddInstrumentFunction(TrataCargaModulo, NULL);
-
-   // registra a função "TrataDescargaModulo" para ser executada quando um módulo for descarregado
-   IMG_AddUnloadFunction(TrataDescargaModulo, NULL);
-   
-   // registra a função "TrataExcecao" para executar quando houver uma troca de contexto no processador
-   PIN_AddContextChangeFunction(TrataExcecao, 0);
-
-   // registra a função "FinalizaThread" para ser executada quando uma thread for terminar
-   PIN_AddThreadFiniFunction(FinalizaThread, NULL);
-   ****/
-   
+ 
    // Abre o arquivo de saída no modo apêndice. Se não for passado um nome para o arquivo na linha de comandos, usa "Pintool.out"
    arquivo_saida.open(KnobArquivoSaida.Value().c_str(), std::ofstream::out | std::ofstream::app);
 
