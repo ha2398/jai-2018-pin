@@ -1,10 +1,8 @@
 /**
- * Autor: Hugo Sousa (hugosousa@dcc.ufmg.br)
+ * @author: Hugo Sousa (hugosousa@dcc.ufmg.br)
  *
- * lbrmatch.cpp: Pintool usada para simular a estrutura de
- * um LBR para instruções de chamada de função (CALL) e
- * checar por correspondências entre elas e instruções de
- * retorno.
+ * lbrmatch.cpp: Pintool used to simulate the LBR hardware and check for CALL
+ * matches using it.
  */
 
 #include "pin.H"
@@ -14,20 +12,22 @@
 
 using namespace std;
 
-KNOB<string> outFileKnob(KNOB_MODE_WRITEONCE, "pintool",
-	"o", "lbr_out.log", "Nome do arquivo de saída.");
+// Get the output file name from the command line.
+KNOB<string> outFileKnob(KNOB_MODE_WRITEONCE, "pintool", "o", \
+	"lbr_out.log", "Output file name");
 
-KNOB<unsigned int> lbrSizeKnob(KNOB_MODE_WRITEONCE,
-	"pintool", "s", "16", "Número de entradas do LBR.");
+// Get the number of entries on each LBR.
+KNOB<unsigned int> lbrSizeKnob(KNOB_MODE_WRITEONCE, "pintool", "s",
+	"32", "Number of entries on each LBR");
 
 /**
- * Estrutura de dados LBR (Last Branch Record).
+ * LBR (Last Branch Record) data structure.
  */
 
 /**
- * Uma entrada do LBR nessa Pintool será composta pelo endereço
- * da instrução CALL e um booleano que indica se esse é um CALL
- * direto (true) ou indireto (false).
+ * A LBR entry is composed by the address of the branch instruction and
+ * a boolean that indicates whether this is a direct branch (true) or
+ * indirect (false).
  */
 typedef pair<ADDRINT, bool> LBREntry;
 
@@ -79,29 +79,51 @@ const string done("\t- Done.");
 static ofstream outputFile; // Output file
 
 LBR callLBR(lbrSizeKnob.Value()); // CALL LBR
-unsigned long callLBRMatches = 0;
+unsigned long callLBRDirectCALLMatches = 0;
+unsigned long callLBRIndirectCALLMatches = 0;
+
+LBR indirectCallLBR(lbrSizeKnob.Value()); // Indirect CALLs LBR
+unsigned long indirectCallLBRMatches = 0;
+
+unsigned long instCount = 0; // Total number of instructions
+unsigned long retCount = 0; // Number of RETs found
+unsigned long directCallCount = 0; // Number of direct CALLs found
+unsigned long indirectCallCount = 0; // Number of indirect CALLs found
 
 VOID doRET(ADDRINT returnAddr) {
 	/**
-	 * Função de análise para instruções de retorno.
+	 * Pintool analysis function for return instructions.
 	 *
-	 * @returnAddr: Endereço de retorno.
+	 * @returnAddr: Return address.
 	 */
 	 
 	LBREntry lastEntry;
+	retCount++;
 	
 	/**
-	 * Instrução CALL anterior ao endereço de retorno
-   * pode estar de 2 a 7 bytes antes dele.
-	 *
-	 * callLBR é um objeto da classe LBR.
+	 * Candidate CALL can be from 2 to 7 bytes before the return address.
 	 */
+	
 	lastEntry = callLBR.getLastEntry();
 	for (int i = 2; i <= 7; i++) {
 		ADDRINT candidate = returnAddr - i;
 		
 		if (candidate == lastEntry.first) {
-			callLBRMatches++;
+			if (lastEntry.second)
+				callLBRDirectCALLMatches++;
+			else
+				callLBRIndirectCALLMatches++;
+
+			break;
+		}
+	}
+	
+	lastEntry = indirectCallLBR.getLastEntry();
+	for (int i = 2; i <= 7; i++) {
+		ADDRINT candidate = returnAddr - i;
+		
+		if (candidate == lastEntry.first) {
+			indirectCallLBRMatches++;
 			break;
 		}
 	}
@@ -109,38 +131,94 @@ VOID doRET(ADDRINT returnAddr) {
 	callLBR.pop();
 }
 
-VOID doCALL(ADDRINT addr) {
+VOID doDirectCALL(ADDRINT addr) {
 	/**
-	 * Função de análise para instruções de chamada de função.
+	 * Pintool analysis fuction for direct call instructions.
 	 *
-	 * @addr: O endereço da instrução.
+	 * @addr: The instruction's address.
 	 */
 	
+	directCallCount++;
 	callLBR.put(make_pair(addr, true));
 }
 
+VOID doIndirectCALL(ADDRINT addr) {
+	/**
+	 * Pintool analysis fuction for indirect call instructions.
+	 *
+	 * @addr: The instruction's address.
+	 */
+	
+	indirectCallCount++;
+	callLBR.put(make_pair(addr, false));
+	indirectCallLBR.put(make_pair(addr, false));
+}
+
+VOID PIN_FAST_ANALYSIS_CALL doCount(UINT32 numIns) {
+	/**
+	 * Pintool analysis function for counting the number of instructions in
+	 * each basic block.
+	 *
+	 * @numIns: Number of instructions in the current basic block.
+	 */
+	 
+	instCount += numIns;
+}
+
 VOID InstrumentCode(TRACE trace, VOID *v) {
-  /**
-   * Função de instrumentação da Pintool.
-   * 
-   * Cada bloco básico tem um único ponto de entrada
-   * e um único ponto de saída. Assim, CALLs e RETs 
-   * somente podem ser encontradas ao fim de blocos
-   * básicos.
-   */
-
-  for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
-  
-    INS tail = BBL_InsTail(bbl);
-
-    if (INS_IsRet(tail)) {
-      INS_InsertCall(tail, IPOINT_BEFORE, (AFUNPTR) doRET,
-      	IARG_BRANCH_TARGET_ADDR, IARG_END);
-    } else if (INS_IsCall(tail)) {
-      INS_InsertCall(tail, IPOINT_BEFORE, (AFUNPTR) doCALL,
-      	IARG_INST_PTR, IARG_END);
+    /**
+	 * Pintool instrumentation function.
+	 * 
+     * Each Basic Block (BBL) has a single entrace point and a single exit one
+     * as well. Hence, CALL and RET instructions will only be found at the end
+     * of these BBLs.
+     */
+	 
+    for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
+		BBL_InsertCall(bbl, IPOINT_ANYWHERE, (AFUNPTR) doCount, \
+			IARG_FAST_ANALYSIS_CALL, IARG_UINT32, BBL_NumIns(bbl), IARG_END);	
+		
+        INS tail = BBL_InsTail(bbl);
+		
+		if (INS_IsRet(tail)) {
+			INS_InsertCall(tail, IPOINT_BEFORE, (AFUNPTR) doRET, \
+				IARG_BRANCH_TARGET_ADDR, IARG_END);
+		} else if (INS_IsCall(tail)) {
+			if (INS_IsDirectCall(tail))
+				INS_InsertCall(tail, IPOINT_BEFORE, (AFUNPTR) doDirectCALL, \
+					IARG_INST_PTR, IARG_END);
+			else
+				INS_InsertCall(tail, IPOINT_BEFORE, (AFUNPTR) doIndirectCALL, \
+					IARG_INST_PTR, IARG_END);
+		}
+			
     }
-  }
+}
+
+void printExperimentReport() {
+	/**
+	 * Print the report for the LBR experiment.
+	 */
+	
+	outputFile << "Reports for experiment \"LBR Match\" with " << \
+		lbrSizeKnob.Value() << " entries" << endl << endl;
+	outputFile << "[+] Number of instructions executed:" << endl << \
+		"\t" << instCount << endl << endl;
+	outputFile << "[+] Number of RET instructions:" << endl << \
+		"\t" << retCount << endl << endl;
+	outputFile << "[+] Number of Direct CALL instructions:" << endl << \
+		"\t" << directCallCount << endl << endl;
+	outputFile << "[+] Number of Indirect CALL instructions:" << endl << \
+		"\t" << indirectCallCount << endl << endl;
+	outputFile << "[+] CALL LBR Matches:" << endl << \
+		"\t" << callLBRDirectCALLMatches + callLBRIndirectCALLMatches << \
+		endl << endl << \
+		"\t[+] Direct CALL Matches:" << endl << \
+		"\t\t" << callLBRDirectCALLMatches << endl << \
+		"\t[+] Indirect CALL Matches:" << endl << \
+		"\t\t" << callLBRIndirectCALLMatches << endl << endl;
+	outputFile << "[+] Indirect CALL LBR Matches:" << endl << \
+		"\t" << indirectCallLBRMatches << endl << endl;
 }
 
 VOID Fini(INT32 code, VOID *v) {
@@ -150,7 +228,7 @@ VOID Fini(INT32 code, VOID *v) {
 	 */
 	
 	cerr << done << endl;
-	outputFile << callLBRMatches << endl;
+	printExperimentReport();
     outputFile.close();
 }
 
